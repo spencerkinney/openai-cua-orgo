@@ -1,4 +1,3 @@
-import os
 import time
 from openai import OpenAI
 from orgo import Computer
@@ -6,102 +5,65 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def execute_action(computer_environment, action):
-    """Map OpenAI computer actions to Orgo commands"""
-    match action.type:
-        case "click":
-            x, y = action.x, action.y
-            button = getattr(action, 'button', 'left')
-            if button == "right":
-                computer_environment.right_click(x, y)
-            else:
-                computer_environment.left_click(x, y)
-                
-        case "double_click":
-            computer_environment.double_click(action.x, action.y)
-            
-        case "type":
-            computer_environment.type(action.text)
-            
-        case "key" | "keypress":
-            keys = action.keys if hasattr(action, 'keys') else [action.key]
-            # Combine modifier keys into single command
-            if len(keys) > 1:
-                # Join keys with '+' for shortcuts like 'ctrl+c' or 'shift+p'
-                key_combo = '+'.join(keys).lower()
-                computer_environment.key(key_combo)
-            else:
-                for key in keys:
-                    computer_environment.key(key)
-                
-        case "scroll":
-            x, y = action.x, action.y
-            scroll_y = getattr(action, 'scroll_y', 0)
-            direction = "down" if scroll_y > 0 else "up"
-            amount = abs(scroll_y) // 100
-            computer_environment.scroll(direction, amount)
-            
-        case "wait":
-            seconds = getattr(action, 'seconds', 2)
-            computer_environment.wait(seconds)
-            
-        case "screenshot":
-            pass  # Screenshot taken after each action
 
 def run_computer_task(task, project_id=None):
-    # Initialize OpenAI client and Orgo computer
-    openai_client = OpenAI()
-    computer_environment = Computer(project_id=project_id)
+    client = OpenAI()
+    computer = Computer(project_id=project_id)
+    print(f"🖥️  Computer ID: {computer.project_id}")
     
-    # Configure computer tool
-    tool_config = {
-        "type": "computer_use_preview",
-        "display_width": 1024,
-        "display_height": 768,
-        "environment": "linux"
-    }
-    
-    # Enhanced task with double-click instructions (removed wait instruction)
-    enhanced_task = f"""IMPORTANT: You are controlling a Linux desktop. 
+    response = client.responses.create(
+        model="computer-use-preview",
+        tools=[{
+            "type": "computer_use_preview",
+            "display_width": 1024,
+            "display_height": 768,
+            "environment": "linux"
+        }],
+        input=[{
+            "role": "user",
+            "content": [{
+                "type": "input_text", 
+                "text": f"""IMPORTANT: You are controlling a Linux desktop. 
 - Always double-click desktop icons to open applications
 - Use keyboard shortcuts as single commands (e.g., 'ctrl+c' not separate keys)
 
 Task: {task}"""
-    
-    # Send task to OpenAI
-    response = openai_client.responses.create(
-        model="computer-use-preview",
-        tools=[tool_config],
-        input=[{
-            "role": "user",
-            "content": [{"type": "input_text", "text": enhanced_task}]
+            }]
         }],
         reasoning={"summary": "concise"},
         truncation="auto"
     )
     
-    # Execute actions until complete
     while True:
-        actions = [item for item in response.output if item.type == "computer_call"]
+        for item in response.output:
+            if item.type == "reasoning" and hasattr(item, "summary"):
+                for summary in item.summary:
+                    if hasattr(summary, "text"):
+                        print(f"💭 {summary.text}")
+            elif item.type == "text" and hasattr(item, "text"):
+                print(f"💬 {item.text}")
         
+        actions = [item for item in response.output if item.type == "computer_call"]
         if not actions:
             print("✓ Task completed")
             break
-        
+            
         action = actions[0]
         print(f"→ {action.action.type}")
-        execute_action(computer_environment, action.action)
         
-        # Wait 1 second before taking screenshot (for UI to update)
-        import time
+        execute_action(computer, action.action)
         time.sleep(1)
         
-        # Send screenshot back to OpenAI
-        screenshot = computer_environment.screenshot_base64()
-        response = openai_client.responses.create(
+        screenshot = computer.screenshot_base64()
+        response = client.responses.create(
             model="computer-use-preview",
             previous_response_id=response.id,
-            tools=[tool_config],
+            tools=[{
+                "type": "computer_use_preview",
+                "display_width": 1024,
+                "display_height": 768,
+                "environment": "linux"
+            }],
             input=[{
                 "call_id": action.call_id,
                 "type": "computer_call_output",
@@ -110,14 +72,47 @@ Task: {task}"""
                     "image_url": f"data:image/png;base64,{screenshot}"
                 }
             }],
+            reasoning={"summary": "concise"},
             truncation="auto"
         )
     
-    return computer_environment
+    return computer
+
+
+def execute_action(computer, action):
+    match action.type:
+        case "click":
+            if getattr(action, 'button', 'left') == "right":
+                computer.right_click(action.x, action.y)
+            else:
+                computer.left_click(action.x, action.y)
+                
+        case "double_click":
+            computer.double_click(action.x, action.y)
+            
+        case "type":
+            computer.type(action.text)
+            
+        case "key" | "keypress":
+            keys = getattr(action, 'keys', [getattr(action, 'key', [])])
+            if len(keys) > 1:
+                computer.key('+'.join(keys).lower())
+            else:
+                for key in keys:
+                    computer.key(key)
+                    
+        case "scroll":
+            scroll_y = getattr(action, 'scroll_y', 0)
+            direction = "down" if scroll_y > 0 else "up"
+            computer.scroll(direction, abs(scroll_y) // 100)
+            
+        case "wait":
+            computer.wait(getattr(action, 'seconds', 2))
+            
+        case "screenshot":
+            pass
+
 
 if __name__ == "__main__":
-    computer_environment = run_computer_task(
-        "can you open up libreoffice and insert some random data into a spreadsheet",
-        project_id="computer-pvhvll"
-    )
-    # computer_environment.shutdown()  # Optional cleanup
+    computer = run_computer_task("open a terminal and run 'ls -l'")
+    computer.destroy()
